@@ -20,7 +20,7 @@ echo ""
 
 # Test extraction
 echo "2. Testing extraction (chemical spray)..."
-INPUT_TRANSCRIPT="Kemarin saya semprot pestisida di kebun tomat baris 3 pakai sprayer gendong"
+INPUT_TRANSCRIPT="Kemarin anak saya sudah semprot pestisida di kebun tomat baris 3 pakai sprayer gendong kira-kira habis setengah liter, sekarang sih tanamannya sehat, ini sudah minggu kedua, tapi daun-daunnya mulai ada bintik kuning kecil, mungkin karena serangan hama lagi ya, cuaca juga lagi sering hujan. Saya pakai pestisida jenis organik yang kemarin direkomendasikan sama penyuluh pertanian, soalnya saya pengen hasil panennya nanti aman untuk dikonsumsi keluarga saya juga."
 echo "Input: $INPUT_TRANSCRIPT"
 EXTRACT_RESPONSE=$(curl -s -X POST "$BASE_URL/api/extract" \
   -H "Content-Type: application/json" \
