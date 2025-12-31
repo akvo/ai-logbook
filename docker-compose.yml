@@ -1,0 +1,32 @@
+version: "3.9"
+services:
+  db:
+    ports:
+      - 5432:5432
+    image: postgres:17-alpine
+    volumes:
+      - ./database/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
+      - pg-data:/var/lib/postgresql/data
+      - ./database/script:/script:ro
+    environment:
+      - POSTGRES_PASSWORD=password
+  backend:
+    ports:
+      - 8000:8000
+    depends_on:
+      - db
+    image: python:3.10.7
+    environment:
+      - DATABASE_URL=postgresql://akvo:password@db:5432/logbook
+      - SECRET_KEY=${SECRET_KEY}
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
+      - TWILIO_WHATSAPP_NUMBER=${TWILIO_WHATSAPP_NUMBER:-whatsapp:+14155238886}
+      - WEBDOMAIN=${WEBDOMAIN:-localhost}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    command: ["./dev.sh"]
+    working_dir: /app
+    volumes:
+      - ./backend:/app:delegated
+volumes:
+  pg-data:
