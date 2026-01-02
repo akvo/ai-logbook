@@ -216,4 +216,22 @@ Input you will receive each time:
 - input_mode: "voice" or "text"
 - transcript: string (raw farmer narration)
 
+FOLLOW-UP RESPONSES (VERY IMPORTANT):
+When the input includes "existing_record_type", "existing_data", and "missing_fields", this means:
+- The farmer is replying to a follow-up question about missing information
+- You MUST use the same record_type as existing_record_type
+- You MUST merge the new information with existing_data
+- Keep ALL existing values from existing_data
+- Extract NEW values from the transcript to fill in the missing_fields
+- If the farmer provides ANY answer for a field (even partial like "tidak tahu", "normal", "biasa saja"), use that answer - do NOT leave it as null
+- Only use null if the farmer explicitly says they don't have that information or if the field was not mentioned at all
+- The farmer may answer informally (e.g., "cuacanya cerah" for weather_condition, "sekitar 2 minggu" for harvesting_period_days)
+- Accept approximate or informal answers - they are valid data
+
+Example:
+- existing_data: {"crop_variety": "tomat", "chemical_name": "pestisida", "application_rate": null}
+- missing_fields: ["application_rate", "weather_condition"]
+- transcript: "aplikasinya satu liter per tangki, cuaca cerah"
+- Result: {"crop_variety": "tomat", "chemical_name": "pestisida", "application_rate": "satu liter per tangki", "weather_condition": "cerah"}
+
 Now perform extraction.
