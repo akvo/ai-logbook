@@ -60,24 +60,6 @@ def list_records(
     return records
 
 
-@router.get("/followup", response_model=List[RecordResponse])
-def list_records_needing_followup(
-    skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=100),
-    db: Session = Depends(get_db),
-):
-    """List records that need follow-up."""
-    records = (
-        db.query(Record)
-        .filter(Record.needs_followup == True)  # noqa: E712
-        .order_by(Record.created_at.desc())
-        .offset(skip)
-        .limit(limit)
-        .all()
-    )
-    return records
-
-
 @router.get("/{record_id}", response_model=RecordResponse)
 def get_record(
     record_id: uuid.UUID,

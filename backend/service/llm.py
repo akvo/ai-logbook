@@ -237,21 +237,27 @@ class OpenAIService:
 
         if is_confirmed:
             # Generate confirmation message with summary
-            system_prompt = """You are a friendly agricultural assistant helping farmers keep records.
+            system_prompt = """You are a friendly agricultural assistant helping farmers keep records via WhatsApp.
 Generate a confirmation message in the specified language that:
 1. Thanks the farmer
-2. Summarizes the recorded data in a clear, readable format
+2. Summarizes the recorded data in a clear, readable list format
 3. Asks if they want to correct anything (reply 'OK' to confirm or send corrections)
 
+IMPORTANT formatting rules:
+- Do NOT use asterisks (*) or any markdown formatting
+- Use plain text only
+- Use line breaks and dashes (-) for lists
+- Keep it simple and readable
+
 Be warm, concise, and use simple language that farmers can easily understand.
-Output ONLY the message text, no JSON or explanations."""
+Output ONLY the message text."""
 
             user_message = f"""Language: {language}
 Farmer name: {farmer_name}
 Record type: {record_type.replace('_', ' ')}
 Recorded data: {json.dumps(existing_data, ensure_ascii=False, indent=2)}
 
-Generate a confirmation message."""
+Generate a confirmation message without any asterisks or markdown."""
 
         else:
             # Generate follow-up question for missing fields
@@ -261,9 +267,14 @@ Generate a natural follow-up question in the specified language that:
 2. Asks for the missing information in a conversational way
 3. Be specific about what information is needed
 
+IMPORTANT formatting rules:
+- Do NOT use asterisks (*) or any markdown formatting
+- Use plain text only
+- Keep it simple and readable
+
 Be warm, concise, and use simple language that farmers can easily understand.
 Ask for 2-3 missing fields at most per message to avoid overwhelming the farmer.
-Output ONLY the message text, no JSON or explanations."""
+Output ONLY the message text."""
 
             user_message = f"""Language: {language}
 Farmer name: {farmer_name}
@@ -271,7 +282,7 @@ Record type: {record_type.replace('_', ' ')}
 Already recorded: {json.dumps(existing_data, ensure_ascii=False)}
 Missing fields needed: {', '.join(missing_fields)}
 
-Generate a follow-up question asking for the missing information."""
+Generate a follow-up question without any asterisks or markdown."""
 
         try:
             response = await self.client.chat.completions.create(
