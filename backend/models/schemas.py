@@ -92,7 +92,8 @@ class RecordCreate(RecordBase):
     source_language: str = "unknown"
     confidence: float = 0.0
     missing_fields: List[str] = Field(default_factory=list)
-    needs_followup: bool = False
+    needs_followup: bool = True
+    confirmed: bool = False
     quality_notes: Optional[str] = None
     raw_transcript: Optional[str] = None
 
@@ -104,6 +105,7 @@ class RecordUpdate(BaseModel):
     confidence: Optional[float] = None
     missing_fields: Optional[List[str]] = None
     needs_followup: Optional[bool] = None
+    confirmed: Optional[bool] = None
     quality_notes: Optional[str] = None
 
 
@@ -117,6 +119,7 @@ class RecordResponse(RecordBase):
     confidence: float
     missing_fields: List[str]
     needs_followup: bool
+    confirmed: bool
     quality_notes: Optional[str]
     raw_transcript: Optional[str]
     created_at: datetime

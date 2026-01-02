@@ -1,18 +1,32 @@
 import logging
 from datetime import date
 
-from fastapi import APIRouter, Request, HTTPException, Depends
-from fastapi.responses import PlainTextResponse
+from fastapi import APIRouter, Request, Depends, Response
 from sqlalchemy.orm import Session
 
 from db import get_db
 from models.models import Farmer, Record, Message, MessageDirection, RecordType
 from service.llm import get_openai_service
 from service.twilio_service import get_twilio_service, IncomingMessage
+from service.validation import should_need_followup, can_be_confirmed
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/webhook", tags=["webhook"])
+
+
+def get_pending_record(db: Session, farmer: Farmer) -> Record | None:
+    """Get the most recent unconfirmed record for a farmer."""
+    return (
+        db.query(Record)
+        .filter(
+            Record.farmer_id == farmer.id,
+            Record.confirmed == False,  # noqa: E712
+            Record.needs_followup == True,  # noqa: E712
+        )
+        .order_by(Record.created_at.desc())
+        .first()
+    )
 
 
 def get_or_create_farmer(
@@ -21,7 +35,6 @@ def get_or_create_farmer(
     name: str,
 ) -> Farmer:
     """Get existing farmer or create new one by phone number."""
-    # Use phone number as external_id
     farmer = db.query(Farmer).filter(Farmer.external_id == phone_number).first()
 
     if not farmer:
@@ -58,93 +71,124 @@ def store_message(
     return message
 
 
-def store_records(
+def update_record(
+    db: Session,
+    record: Record,
+    extracted_data: dict,
+    raw_transcript: str,
+) -> Record:
+    """Update an existing record with new extracted data."""
+    raw = extracted_data
+
+    # Parse occurred_at
+    occurred_at_str = raw.get("occurred_at")
+    if occurred_at_str:
+        try:
+            record.occurred_at = date.fromisoformat(occurred_at_str)
+        except (ValueError, TypeError):
+            pass
+
+    # Merge new data with existing data
+    new_data = raw.get("data", {})
+    merged_data = dict(record.data)  # Copy existing
+    for key, value in new_data.items():
+        if value is not None and value != "":
+            merged_data[key] = value
+    record.data = merged_data
+
+    # Update quality info
+    quality = raw.get("quality", {})
+    if quality.get("confidence"):
+        record.confidence = quality["confidence"]
+    if quality.get("notes"):
+        record.quality_notes = quality["notes"]
+
+    # Append to raw transcript
+    record.raw_transcript = f"{record.raw_transcript}\n---\n{raw_transcript}"
+
+    # Re-validate with merged data
+    occurred_at_str = record.occurred_at.isoformat() if record.occurred_at else None
+    needs_followup, validation_missing = should_need_followup(
+        record_type=record.record_type,
+        occurred_at=occurred_at_str,
+        data=record.data,
+    )
+
+    record.missing_fields = validation_missing
+    record.needs_followup = needs_followup
+    record.confirmed = can_be_confirmed(record.record_type, occurred_at_str, record.data)
+
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+def create_record(
     db: Session,
     farmer: Farmer,
     message: Message,
-    extracted_records: list,
+    extracted_data: dict,
     input_mode: str,
     raw_transcript: str,
-) -> list[Record]:
-    """Store extracted records in database."""
-    records = []
+) -> Record:
+    """Create a new record from extracted data."""
+    raw = extracted_data
 
-    for raw in extracted_records:
+    # Get record type
+    record_type_str = raw.get("record_type", "unknown")
+    try:
+        record_type = RecordType(record_type_str)
+    except ValueError:
+        record_type = RecordType.UNKNOWN
+
+    # Parse occurred_at
+    occurred_at = None
+    occurred_at_str = raw.get("occurred_at")
+    if occurred_at_str:
         try:
-            # Get record type
-            record_type_str = raw.get("record_type", "unknown")
-            try:
-                record_type = RecordType(record_type_str)
-            except ValueError:
-                record_type = RecordType.UNKNOWN
+            occurred_at = date.fromisoformat(occurred_at_str)
+        except (ValueError, TypeError):
+            pass
 
-            # Parse occurred_at
-            occurred_at = None
-            if raw.get("occurred_at"):
-                try:
-                    occurred_at = date.fromisoformat(raw["occurred_at"])
-                except (ValueError, TypeError):
-                    pass
+    # Get source info
+    source = raw.get("source", {})
+    quality = raw.get("quality", {})
+    data = raw.get("data", {})
 
-            # Get source info
-            source = raw.get("source", {})
-            quality = raw.get("quality", {})
+    # Server-side validation: check for null fields
+    needs_followup, validation_missing = should_need_followup(
+        record_type=record_type,
+        occurred_at=occurred_at_str,
+        data=data,
+    )
 
-            record = Record(
-                farmer_id=farmer.id,
-                message_id=message.id,
-                record_type=record_type,
-                occurred_at=occurred_at,
-                data=raw.get("data", {}),
-                source_channel=source.get("channel", "whatsapp"),
-                source_input_mode=input_mode,
-                source_language=source.get("language", "unknown"),
-                confidence=quality.get("confidence", 0.0),
-                missing_fields=quality.get("missing_fields", []),
-                needs_followup=quality.get("needs_followup", False),
-                quality_notes=quality.get("notes"),
-                raw_transcript=raw_transcript,
-            )
-            db.add(record)
-            records.append(record)
+    # Merge LLM's missing_fields with validation missing fields
+    llm_missing = quality.get("missing_fields", [])
+    all_missing = list(set(llm_missing + validation_missing))
 
-        except Exception as e:
-            logger.error(f"Failed to store record: {e}")
-            continue
+    # Determine if record can be confirmed
+    confirmed = can_be_confirmed(record_type, occurred_at_str, data)
 
-    if records:
-        db.commit()
-        for r in records:
-            db.refresh(r)
-
-    return records
-
-
-def generate_confirmation(records: list[Record], language: str = "en") -> str:
-    """Generate confirmation message for farmer."""
-    if not records:
-        return "No records could be extracted from your message. Please try again with more details."
-
-    # Group by record type
-    type_counts = {}
-    for r in records:
-        type_name = r.record_type.value.replace("_", " ")
-        type_counts[type_name] = type_counts.get(type_name, 0) + 1
-
-    parts = [f"{count}x {name}" for name, count in type_counts.items()]
-    record_summary = ", ".join(parts)
-
-    # Check for followups needed
-    followup_records = [r for r in records if r.needs_followup]
-
-    if followup_records:
-        missing = set()
-        for r in followup_records:
-            missing.update(r.missing_fields)
-        missing_str = ", ".join(missing)
-        return f"Recorded: {record_summary}. Missing info needed: {missing_str}"
-
-    return f"Recorded: {record_summary}. Thank you!"
+    record = Record(
+        farmer_id=farmer.id,
+        message_id=message.id,
+        record_type=record_type,
+        occurred_at=occurred_at,
+        data=data,
+        source_channel=source.get("channel", "whatsapp"),
+        source_input_mode=input_mode,
+        source_language=source.get("language", "unknown"),
+        confidence=quality.get("confidence", 0.0),
+        missing_fields=all_missing,
+        needs_followup=needs_followup,
+        confirmed=confirmed,
+        quality_notes=quality.get("notes"),
+        raw_transcript=raw_transcript,
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return record
 
 
 @router.post("/whatsapp")
@@ -158,10 +202,12 @@ async def whatsapp_webhook(
     Flow:
     1. Parse incoming message
     2. Get or create farmer
-    3. If voice: transcribe with Whisper
-    4. Extract records with GPT
-    5. Store in database
-    6. Send confirmation reply
+    3. Check for pending (unconfirmed) record
+    4. If voice: transcribe with Whisper
+    5. Extract/update records with GPT
+    6. Store or update in database
+    7. Generate natural reply using GPT
+    8. Send reply
     """
     twilio = get_twilio_service()
     openai = get_openai_service()
@@ -169,12 +215,6 @@ async def whatsapp_webhook(
     # Parse form data
     form_data = await request.form()
     form_dict = dict(form_data)
-
-    # Validate Twilio signature (optional but recommended)
-    # signature = request.headers.get("X-Twilio-Signature", "")
-    # url = str(request.url)
-    # if not twilio.validate_signature(url, form_dict, signature):
-    #     raise HTTPException(status_code=403, detail="Invalid signature")
 
     # Parse message
     incoming = twilio.parse_incoming_message(form_dict)
@@ -186,6 +226,9 @@ async def whatsapp_webhook(
     # Get or create farmer
     farmer_name = incoming.profile_name or incoming.from_number
     farmer = get_or_create_farmer(db, incoming.from_number, farmer_name)
+
+    # Check for pending unconfirmed record
+    pending_record = get_pending_record(db, farmer)
 
     # Store message
     message = store_message(db, farmer, incoming)
@@ -210,51 +253,91 @@ async def whatsapp_webhook(
                     incoming.from_number,
                     "Sorry, I couldn't process your voice message. Please try again.",
                 )
-                return PlainTextResponse("OK")
+                return Response(status_code=200)
         else:
             logger.error("Failed to download audio")
             twilio.send_reply(
                 incoming.from_number,
                 "Sorry, I couldn't download your voice message. Please try again.",
             )
-            return PlainTextResponse("OK")
+            return Response(status_code=200)
 
     elif incoming.body:
         transcript = incoming.body
     else:
         logger.warning("No content in message")
-        return PlainTextResponse("OK")
+        return Response(status_code=200)
 
-    # Extract records
+    # Prepare existing record context for extraction if pending
+    existing_record_context = None
+    if pending_record:
+        existing_record_context = {
+            "record_type": pending_record.record_type.value,
+            "data": pending_record.data,
+            "missing_fields": pending_record.missing_fields,
+            "occurred_at": pending_record.occurred_at.isoformat() if pending_record.occurred_at else None,
+        }
+        logger.info(f"Found pending record {pending_record.id}, will update instead of create")
+
+    # Extract records (with context if updating)
     extracted = await openai.extract(
         transcript=transcript,
         farmer_id=farmer.external_id,
         farmer_name=farmer.name,
         input_mode=input_mode,
         current_date=date.today(),
+        existing_record=existing_record_context,
     )
 
-    # Store records
-    records = store_records(
-        db=db,
-        farmer=farmer,
-        message=message,
-        extracted_records=extracted,
-        input_mode=input_mode,
-        raw_transcript=transcript,
-    )
+    # Process extracted data
+    record = None
+    if pending_record and extracted:
+        # Update existing record
+        record = update_record(
+            db=db,
+            record=pending_record,
+            extracted_data=extracted[0],
+            raw_transcript=transcript,
+        )
+        logger.info(f"Updated existing record {record.id}")
+    elif extracted:
+        # Create new record
+        record = create_record(
+            db=db,
+            farmer=farmer,
+            message=message,
+            extracted_data=extracted[0],
+            input_mode=input_mode,
+            raw_transcript=transcript,
+        )
+        logger.info(f"Created new record {record.id}")
 
     # Mark message as processed
     message.processed = True
     db.commit()
 
-    # Send confirmation
-    source_lang = "en"
-    if extracted:
-        source_lang = extracted[0].get("source", {}).get("language", "en")
+    # Generate reply using OpenAI
+    if not record:
+        reply = "Sorry, I couldn't extract any records from your message. Please try again with more details."
+    else:
+        source_lang = record.source_language or "en"
 
-    confirmation = generate_confirmation(records, source_lang)
-    twilio.send_reply(incoming.from_number, confirmation)
+        # Build existing data with occurred_at
+        existing_data = dict(record.data)
+        if record.occurred_at:
+            existing_data["occurred_at"] = record.occurred_at.isoformat()
 
-    logger.info(f"Processed message, created {len(records)} records")
-    return PlainTextResponse("OK")
+        reply = await openai.generate_reply(
+            record_type=record.record_type.value,
+            existing_data=existing_data,
+            missing_fields=record.missing_fields,
+            language=source_lang,
+            farmer_name=farmer.name,
+            is_confirmed=record.confirmed,
+        )
+
+    twilio.send_reply(incoming.from_number, reply)
+
+    action = "updated" if pending_record else "created"
+    logger.info(f"Processed message, {action} record")
+    return Response(status_code=200)

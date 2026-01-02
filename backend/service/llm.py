@@ -113,6 +113,7 @@ class OpenAIService:
         farmer_name: str,
         input_mode: str = "text",
         current_date: Optional[date] = None,
+        existing_record: Optional[dict] = None,
     ) -> List[dict]:
         """
         Extract structured records from transcript using GPT.
@@ -123,6 +124,7 @@ class OpenAIService:
             farmer_name: Farmer's name
             input_mode: 'voice' or 'text'
             current_date: Current date for relative date inference
+            existing_record: Existing record data to update (for follow-up responses)
 
         Returns:
             List of extracted record dictionaries
@@ -136,13 +138,25 @@ class OpenAIService:
 
         system_prompt = self._load_prompt()
 
+        # If there's an existing record, add context for updating
+        existing_context = ""
+        if existing_record:
+            existing_context = f"""
+- IMPORTANT: This is a follow-up response to complete an existing record.
+- existing_record_type: "{existing_record.get('record_type', 'unknown')}"
+- existing_data: {json.dumps(existing_record.get('data', {}), ensure_ascii=False)}
+- missing_fields: {existing_record.get('missing_fields', [])}
+- The farmer is providing additional information to fill in the missing fields.
+- Merge the new information with existing data. Keep existing values unless explicitly corrected.
+"""
+
         user_message = f"""Input:
 - current_date: "{current_date.isoformat()}"
 - farmer_id: "{farmer_id}"
 - farmer_name: "{farmer_name}"
 - input_mode: "{input_mode}"
 - transcript: "{transcript}"
-"""
+{existing_context}"""
 
         try:
             response = await self.client.chat.completions.create(
@@ -193,6 +207,93 @@ class OpenAIService:
         """Validate extracted record has required fields."""
         required = ["record_type", "farmer", "data", "quality"]
         return all(key in record for key in required)
+
+    async def generate_reply(
+        self,
+        record_type: str,
+        existing_data: dict,
+        missing_fields: List[str],
+        language: str,
+        farmer_name: str,
+        is_confirmed: bool = False,
+    ) -> str:
+        """
+        Generate a natural follow-up message or confirmation using GPT.
+
+        Args:
+            record_type: Type of record (e.g., "chemical_spray")
+            existing_data: Data already collected from farmer
+            missing_fields: List of fields still needed
+            language: Language code (e.g., "id", "en", "my")
+            farmer_name: Farmer's name for personalization
+            is_confirmed: If True, generate confirmation message instead of follow-up
+
+        Returns:
+            Natural language message for the farmer
+        """
+        if not self.is_configured():
+            logger.error("OpenAI client not configured")
+            return "Thank you for your message."
+
+        if is_confirmed:
+            # Generate confirmation message with summary
+            system_prompt = """You are a friendly agricultural assistant helping farmers keep records.
+Generate a confirmation message in the specified language that:
+1. Thanks the farmer
+2. Summarizes the recorded data in a clear, readable format
+3. Asks if they want to correct anything (reply 'OK' to confirm or send corrections)
+
+Be warm, concise, and use simple language that farmers can easily understand.
+Output ONLY the message text, no JSON or explanations."""
+
+            user_message = f"""Language: {language}
+Farmer name: {farmer_name}
+Record type: {record_type.replace('_', ' ')}
+Recorded data: {json.dumps(existing_data, ensure_ascii=False, indent=2)}
+
+Generate a confirmation message."""
+
+        else:
+            # Generate follow-up question for missing fields
+            system_prompt = """You are a friendly agricultural assistant helping farmers keep records via WhatsApp.
+Generate a natural follow-up question in the specified language that:
+1. Briefly acknowledges what was already recorded
+2. Asks for the missing information in a conversational way
+3. Be specific about what information is needed
+
+Be warm, concise, and use simple language that farmers can easily understand.
+Ask for 2-3 missing fields at most per message to avoid overwhelming the farmer.
+Output ONLY the message text, no JSON or explanations."""
+
+            user_message = f"""Language: {language}
+Farmer name: {farmer_name}
+Record type: {record_type.replace('_', ' ')}
+Already recorded: {json.dumps(existing_data, ensure_ascii=False)}
+Missing fields needed: {', '.join(missing_fields)}
+
+Generate a follow-up question asking for the missing information."""
+
+        try:
+            response = await self.client.chat.completions.create(
+                model=OPENAI_EXTRACTION_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                temperature=0.7,
+                max_tokens=500,
+            )
+
+            reply = response.choices[0].message.content.strip()
+            logger.info(f"Generated reply: {reply[:100]}...")
+            return reply
+
+        except OpenAIError as e:
+            logger.error(f"OpenAI reply generation error: {e}")
+            return "Thank you for your message. We'll process it shortly."
+        except Exception as e:
+            logger.error(f"Reply generation failed: {e}")
+            return "Thank you for your message. We'll process it shortly."
 
 
 # Singleton instance

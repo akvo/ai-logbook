@@ -13,6 +13,7 @@ from models.schemas import (
     RecordResponse,
     RecordType as RecordTypeSchema,
 )
+from service.validation import should_need_followup, can_be_confirmed
 
 router = APIRouter(prefix="/api/records", tags=["records"])
 
@@ -24,6 +25,7 @@ def list_records(
     farmer_id: Optional[uuid.UUID] = None,
     record_type: Optional[RecordTypeSchema] = None,
     needs_followup: Optional[bool] = None,
+    confirmed: Optional[bool] = None,
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
     db: Session = Depends(get_db),
@@ -39,6 +41,9 @@ def list_records(
 
     if needs_followup is not None:
         query = query.filter(Record.needs_followup == needs_followup)
+
+    if confirmed is not None:
+        query = query.filter(Record.confirmed == confirmed)
 
     if date_from:
         query = query.filter(Record.occurred_at >= date_from)
@@ -96,17 +101,30 @@ def create_record(
     if not farmer:
         raise HTTPException(status_code=404, detail="Farmer not found")
 
+    record_type = RecordType(record_in.record_type.value)
+    occurred_at_str = record_in.occurred_at.isoformat() if record_in.occurred_at else None
+
+    # Validate and determine needs_followup and confirmed
+    needs_followup, validation_missing = should_need_followup(
+        record_type=record_type,
+        occurred_at=occurred_at_str,
+        data=record_in.data,
+    )
+    all_missing = list(set(record_in.missing_fields + validation_missing))
+    confirmed = can_be_confirmed(record_type, occurred_at_str, record_in.data)
+
     record = Record(
         farmer_id=record_in.farmer_id,
-        record_type=RecordType(record_in.record_type.value),
+        record_type=record_type,
         occurred_at=record_in.occurred_at,
         data=record_in.data,
         source_channel=record_in.source_channel,
         source_input_mode=record_in.source_input_mode,
         source_language=record_in.source_language,
         confidence=record_in.confidence,
-        missing_fields=record_in.missing_fields,
-        needs_followup=record_in.needs_followup,
+        missing_fields=all_missing,
+        needs_followup=needs_followup,
+        confirmed=confirmed,
         quality_notes=record_in.quality_notes,
         raw_transcript=record_in.raw_transcript,
     )
@@ -135,6 +153,21 @@ def update_record(
 
     for field, value in update_data.items():
         setattr(record, field, value)
+
+    # Re-validate after update to set needs_followup and confirmed
+    occurred_at_str = record.occurred_at.isoformat() if record.occurred_at else None
+    needs_followup, validation_missing = should_need_followup(
+        record_type=record.record_type,
+        occurred_at=occurred_at_str,
+        data=record.data,
+    )
+
+    # Update missing_fields with validation results
+    current_missing = record.missing_fields or []
+    all_missing = list(set(current_missing + validation_missing))
+    record.missing_fields = all_missing
+    record.needs_followup = needs_followup
+    record.confirmed = can_be_confirmed(record.record_type, occurred_at_str, record.data)
 
     db.commit()
     db.refresh(record)

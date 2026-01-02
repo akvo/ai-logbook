@@ -109,7 +109,8 @@ class Record(Base):
     missing_fields: Mapped[List[str]] = mapped_column(
         ARRAY(String), default=list
     )
-    needs_followup: Mapped[bool] = mapped_column(Boolean, default=False)
+    needs_followup: Mapped[bool] = mapped_column(Boolean, default=True)
+    confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
     quality_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Audit
