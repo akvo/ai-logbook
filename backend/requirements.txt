@@ -5,6 +5,8 @@ openai
 twilio==9.9.0
 alembic==1.17.2
 python-multipart
+pydantic-settings
+httpx
 pytest
 black
 flake8
